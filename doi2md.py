@@ -2,7 +2,7 @@
 """
 doi2md.py
 Converts a scientific paper to AI-ready Markdown.
-Features Smart Input Detection for DOIs, local PDFs, and Bucket URLs.
+Features Smart Input Detection, Semantic Scholar API, and Figure Extraction.
 """
 
 import sys
@@ -23,7 +23,12 @@ except ImportError:
 try:
     from markitdown import MarkItDown
 except ImportError:
-    sys.exit("❌ Missing dependency: pip install markitdown")
+    sys.exit("❌ Missing dependency: pip install 'markitdown[pdf]'")
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    sys.exit("❌ Missing dependency: pip install pymupdf")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -50,7 +55,7 @@ def clean_doi(doi: str) -> str:
 def fetch_crossref(doi: str) -> dict:
     url = f"https://api.crossref.org/works/{doi}"
     try:
-        r = requests.get(url, timeout=15, headers={"User-Agent": "doi2md/3.1"})
+        r = requests.get(url, timeout=15, headers={"User-Agent": "doi2md/4.0"})
         r.raise_for_status()
         return r.json().get("message", {})
     except requests.RequestException:
@@ -92,6 +97,46 @@ def download_file(url: str, dest: Path) -> bool:
         return True
     except requests.RequestException:
         return False
+
+# ── Extraction Engines ───────────────────────────────────────────────────────
+
+def extract_figures(pdf_path: Path, output_md_path: Path) -> list[Path]:
+    """
+    Extracts meaningful figures from the PDF and saves them in a sibling directory.
+    Filters out tiny images (like ORCID logos or copyright watermarks).
+    """
+    doc = fitz.open(pdf_path)
+    base_name = output_md_path.stem
+    figures_dir = output_md_path.parent / f"{base_name}_figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    
+    extracted_images = []
+    
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        image_list = page.get_images(full=True)
+        
+        for img_index, img in enumerate(image_list):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            image_ext = base_image["ext"]
+            width = base_image.get("width", 0)
+            height = base_image.get("height", 0)
+            
+            # Smart Filter: Skip images smaller than 150x150 pixels (likely icons/logos)
+            if width < 150 or height < 150:
+                continue
+                
+            image_filename = f"page_{page_num + 1}_fig_{img_index + 1}.{image_ext}"
+            image_filepath = figures_dir / image_filename
+            
+            with open(image_filepath, "wb") as f:
+                f.write(image_bytes)
+                
+            extracted_images.append(image_filepath)
+            
+    return extracted_images
 
 # ── Content Generation ───────────────────────────────────────────────────────
 
@@ -136,7 +181,7 @@ def merge_metadata(cr_meta: dict, s2_meta: dict, doi: str) -> dict:
         "tldr": s2_meta.get("tldr", {}).get("text", "")
     }
 
-def generate_markdown(meta: dict, pdf_text: str = "") -> str:
+def generate_markdown(meta: dict, pdf_text: str, figures: list[Path], output_md_path: Path) -> str:
     header = f"""---
 doi: "{meta.get('doi', '')}"
 title: >
@@ -166,15 +211,23 @@ source: "doi2md"
     else:
         body += "> ⚠️ **Full Text Missing:** PDF was not provided locally and could not be found via Open Access.\n"
 
+    # Append Figures Section
+    if figures:
+        body += "\n---\n## Extracted Figures\n\n"
+        for fig_path in figures:
+            # Create a relative path from the markdown file to the image folder
+            rel_path = f"{output_md_path.stem}_figures/{fig_path.name}"
+            body += f"![Figure: {fig_path.name}]({rel_path})\n\n"
+
     return header + body
 
 
 # ── Main Execution ───────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert scientific papers to AI-ready Markdown.")
+    parser = argparse.ArgumentParser(description="Convert scientific papers to AI-ready Markdown with Figure Extraction.")
     parser.add_argument("input", nargs="?", help="Universal Input: DOI, PDF URL, or Local PDF path")
-    parser.add_argument("--doi", help="Explicitly define DOI (useful if input is just a bucket PDF without DOI metadata)")
+    parser.add_argument("--doi", help="Explicitly define DOI (useful if input is just a bucket PDF)")
     parser.add_argument("--output", "-o", help="Custom output Markdown filename.")
     parser.add_argument("--email", default="researcher@example.com", help="Email for Unpaywall.")
     args = parser.parse_args()
@@ -183,7 +236,6 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # 1. Smart Input Detection
     target_doi = clean_doi(args.doi) if args.doi else ""
     target_pdf = ""
 
@@ -200,11 +252,23 @@ def main():
 
     print("\n🚀 doi2md Execution Started")
     print("=" * 60)
+    
+    # Pre-calculate Output Path to organize figures accurately
+    out_name = args.output
+    if not out_name:
+        if target_doi:
+            out_name = f"{target_doi.replace('/', '_')}.md"
+        elif target_pdf and not is_url(target_pdf):
+            out_name = f"{Path(target_pdf).stem}.md"
+        else:
+            out_name = "extracted_paper.md"
+    out_path = Path(out_name)
+
     print(f"📄 Detected DOI: {target_doi or 'None (PDF-only mode)'}")
     if target_pdf:
         print(f"📂 Detected PDF Source: {target_pdf}")
 
-    # 2. Fetch Metadata (Only if DOI exists)
+    # Fetch Metadata
     cr_meta, s2_meta = {}, {}
     if target_doi:
         print("\n🔍 Fetching base metadata from CrossRef...")
@@ -214,7 +278,7 @@ def main():
     
     unified_meta = merge_metadata(cr_meta, s2_meta, target_doi)
 
-    # 3. Handle PDF Source
+    # Handle PDF Source
     pdf_path = None
     is_temp_pdf = False
 
@@ -247,11 +311,16 @@ def main():
         else:
             print("⚠️  No OA PDF found. Metadata only will be generated.")
 
-    # 4. Conversion
+    # Processing (Text + Figures)
     pdf_text = ""
+    extracted_figs = []
+    
     if pdf_path:
+        print("\n🖼️  Extracting figures from PDF...")
+        extracted_figs = extract_figures(pdf_path, out_path)
+        print(f"✅ Found and saved {len(extracted_figs)} significant figures.")
+
         print("\n⚙️  Parsing PDF full text with MarkItDown...")
-        print("   ℹ️ Preserving standard dimensions (e.g., A4: 210 mm x 297 mm / 8.27 in x 11.69 in)")
         try:
             md_converter = MarkItDown(enable_plugins=False)
             pdf_text = md_converter.convert(str(pdf_path)).text_content
@@ -262,22 +331,14 @@ def main():
         if is_temp_pdf:
             pdf_path.unlink(missing_ok=True)
 
-    markdown_content = generate_markdown(unified_meta, pdf_text)
+    markdown_content = generate_markdown(unified_meta, pdf_text, extracted_figs, out_path)
 
-    # 5. Output Management
-    out_name = args.output
-    if not out_name:
-        if target_doi:
-            out_name = f"{target_doi.replace('/', '_')}.md"
-        elif target_pdf and not is_url(target_pdf):
-            out_name = f"{Path(target_pdf).stem}.md"
-        else:
-            out_name = "extracted_paper.md"
-            
-    out_path = Path(out_name)
+    # Save Output
     out_path.write_text(markdown_content, encoding="utf-8")
     
-    print(f"\n💾 Saved to: {out_path.absolute()}")
+    print(f"\n💾 Document saved to: {out_path.absolute()}")
+    if extracted_figs:
+        print(f"📁 Figures saved to: {(out_path.parent / (out_path.stem + '_figures')).absolute()}")
     print("🤖 Process complete.\n")
 
 if __name__ == "__main__":
