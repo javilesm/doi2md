@@ -31,7 +31,7 @@ Ideal for researchers, AI developers, and Retrieval-Augmented Generation (RAG) w
 
 1. Fully Automatic Conversion (Via DOI)If the paper is Open Access, the script will download the PDF and convert it:
 ```bash
-python doi_to_markdown.py 10.1016/j.oceram.2023.100348
+python /workspaces/doi2md/doi2md.py https://doi.org/10.1016/j.oceram.2023.100348
 ```
 
 2. Save with a Specific Filename:
