@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-doi2md.py  —  v6.0  Deep Extraction Edition
+doi2md.py  —  v6.1  Deep Extraction & Post-Processing Edition
 Converts a scientific paper (DOI, PDF URL, or local file) to structured
 Markdown optimized for AI agent analysis, RAG pipelines, and vector DBs.
 
 Extraction layers:
   L1  CrossRef + Semantic Scholar  → merged bibliographic metadata + TL;DR
-  L2  MarkItDown                   → full text (baseline)
+  L2  MarkItDown                   → full text (baseline) + clean_fulltext()
   L3  pdfplumber                   → tables as TSV (structured)
   L4  pypdf                        → reference list parser → references.bib
-  L5  PyMuPDF                      → figures extracted + caption linking
+  L5  PyMuPDF                      → figures extracted + postprocess_figures()
   L6  Structural parser            → section map + key entities
 
 Output ZIP bundle:
@@ -55,6 +55,11 @@ try:
 except ImportError:
     sys.exit("❌  pip install pymupdf")
 
+try:
+    from postprocess import clean_fulltext, postprocess_figures
+except ImportError:
+    sys.exit("❌  Missing postprocess.py in the same directory.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UTILS
@@ -91,7 +96,7 @@ def _first(val, default=""):
 def download_file(url: str, dest: Path) -> bool:
     try:
         r = requests.get(url, timeout=90, stream=True,
-                         headers={"User-Agent": "Mozilla/5.0 doi2md/6.0"})
+                         headers={"User-Agent": "Mozilla/5.0 doi2md/6.1"})
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(8192):
@@ -112,7 +117,7 @@ def fetch_crossref(doi: str) -> dict:
         r = requests.get(
             f"https://api.crossref.org/works/{doi}",
             timeout=15,
-            headers={"User-Agent": "doi2md/6.0 (mailto:researcher@example.com)"},
+            headers={"User-Agent": "doi2md/6.1 (mailto:researcher@example.com)"},
         )
         r.raise_for_status()
         return r.json().get("message", {})
@@ -130,7 +135,7 @@ def fetch_semantic_scholar(doi: str) -> dict:
         r = requests.get(
             f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields={fields}",
             timeout=15,
-            headers={"User-Agent": "doi2md/6.0"},
+            headers={"User-Agent": "doi2md/6.1"},
         )
         r.raise_for_status()
         return r.json()
@@ -518,7 +523,7 @@ funders:
 {funders_yaml}
 s2_paper_id: "{meta['s2_paper_id']}"
 converted_at: "{datetime.now().isoformat()}"
-source: "doi2md-v6"
+source: "doi2md-v6.1"
 ---
 
 """
@@ -589,10 +594,10 @@ def build_markdown(
         parts.append("\n## Key Entities\n\n"
                      "> Auto-extracted chemical compounds and quantitative values.\n")
         if chems:
-            parts.append(f"\n**Chemical compounds ({len(chems)}):**  \n"
+            parts.append(f"\n**Chemical compounds ({len(chems)}):** \n"
                          f"`{'` · `'.join(chems)}`\n")
         if meas:
-            parts.append(f"\n**Measurements ({len(meas)}):**  \n"
+            parts.append(f"\n**Measurements ({len(meas)}):** \n"
                          f"`{'` · `'.join(meas)}`\n")
 
     # ── Figures gallery ───────────────────────────────────────────────────────
@@ -603,7 +608,7 @@ def build_markdown(
             parts.append(
                 f"\n### Figure {fig['id']} (page {fig['page']})\n\n"
                 f"![{cap}](figures/{fig['filename']})\n\n"
-                f"*{cap}*  \n"
+                f"*{cap}* \n"
                 f"Resolution: {fig['width_px']} × {fig['height_px']} px\n"
             )
 
@@ -638,7 +643,7 @@ def build_markdown(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="doi2md v6 — Scientific paper to Deep Markdown + ZIP for AI agents"
+        description="doi2md v6.1 — Scientific paper to Deep Markdown + ZIP for AI agents"
     )
     parser.add_argument("input", nargs="?",
                         help="DOI, PDF URL, or local PDF path")
@@ -685,7 +690,7 @@ def main():
         or (Path(target_pdf).stem if target_pdf and not is_url(target_pdf) else "paper")
     )
 
-    print(f"\ndoi2md v6  —  Deep Extraction")
+    print(f"\ndoi2md v6.1  —  Deep Extraction & Post-Processing")
     print("=" * 60)
     print(f"  DOI : {target_doi or '—'}")
     print(f"  PDF : {target_pdf or '(auto-discover)'}")
@@ -739,18 +744,22 @@ def main():
     tables_dir  = staging / "tables"
     staging.mkdir(parents=True, exist_ok=True)
 
-    fulltext  = ""
-    sections  = {}
-    entities  = {}
-    tables    = []
-    figures   = []
+    fulltext   = ""
+    sections   = {}
+    entities   = {}
+    tables     = []
+    figures    = []
     references = []
 
     if pdf_path:
         # L2
         print("\n[L2] MarkItDown full text extraction...")
         fulltext = extract_fulltext(pdf_path)
-        print(f"  {len(fulltext):,} chars  /  {len(fulltext.split()):,} words")
+        
+        # L2b: Post-processing / Cleaning
+        print("  [L2b] Applying text post-processing (cleaning artifacts & boilerplate)...")
+        fulltext = clean_fulltext(fulltext, meta)
+        print(f"  {len(fulltext):,} chars  /  {len(fulltext.split()):,} words (post-cleaning)")
 
         # L6a sections
         if not args.no_struct:
@@ -776,7 +785,17 @@ def main():
         if not args.no_figures:
             print("\n[L5] PyMuPDF figure extraction...")
             figures = extract_figures(pdf_path, figures_dir)
-            print(f"  {len(figures)} figures")
+            
+            # L5b: Post-processing / Filtering
+            figures_before = {f["filename"] for f in figures}
+            figures = postprocess_figures(figures)
+            figures_after = {f["filename"] for f in figures}
+            
+            # Limpiar archivos de imágenes descartadas del disco
+            for dropped in figures_before - figures_after:
+                (figures_dir / dropped).unlink(missing_ok=True)
+                
+            print(f"  {len(figures)} figures (after filtering logos/duplicates)")
             if not figures and figures_dir.exists():
                 shutil.rmtree(figures_dir, ignore_errors=True)
 
