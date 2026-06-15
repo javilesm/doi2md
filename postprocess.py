@@ -257,7 +257,37 @@ def remove_reference_stamps(text: str, journal: str, year: str, first_author: st
 # ══════════════════════════════════════════════════════════════════════════════
 # MASTER FULL-TEXT CLEANER
 # ══════════════════════════════════════════════════════════════════════════════
+import re
 
+def fix_fragmented_units(text: str) -> str:
+    """
+    Repara unidades (como °C) que el extractor PDF destrozó en múltiples líneas
+    debido a errores de cálculo de superíndices (bounding-box).
+    """
+    # 1. Fusiona los aros de grado flotantes con la letra 'C' (ej. "◦ \n C" -> "°C")
+    text = re.sub(r"[◦°˚]\s*[\n\r]+\s*C\b", "°C", text)
+
+    # 2. Reconecta los números rotos con su unidad 'C' o '°C' (ej. "240 \n C" -> "240 °C")
+    text = re.sub(r"(\b\d+(?:\.\d+)?)\s*[\n\r]+\s*(°?C)\b", r"\1 °C", text)
+
+    # 3. Limpia los aros de grado huérfanos (◦) que quedaron solos en líneas en blanco
+    text = re.sub(r"^[ \t]*[◦°˚][ \t]*$[\n\r]*", "", text, flags=re.MULTILINE)
+
+    # 4. Soluciona desprendimientos residuales de palabras (ej. "mass \n °C")
+    text = re.sub(r"([a-z])\s*[\n\r]+\s*°C\b", r"\1 °C", text)
+
+    return text
+
+def heal_paragraphs(text: str) -> str:
+    """
+    Desenvuelve los saltos de línea físicos dentro de una misma oración, 
+    preservando los saltos estructurales (listas, títulos, dobles saltos).
+    """
+    # Si una línea termina en letra minúscula, coma o guion, y la siguiente 
+    # comienza con letra o número, significa que es la misma oración cortada.
+    # Reemplazamos el salto de línea (\n) por un espacio simple.
+    return re.sub(r"([a-z,\-])[ \t]*\n[ \t]*([a-zA-Z0-9])", r"\1 \2", text)
+  
 def clean_fulltext(text: str, meta: dict) -> str:
     """
     Apply the full cleaning pipeline to extracted full text.
@@ -297,9 +327,16 @@ def clean_fulltext(text: str, meta: dict) -> str:
     # ── 2. Formatting cleanup ────────────────────────────────────────────────
     text = collapse_justified_spacing(text)
 
+    # NUEVO: Reparación de unidades fragmentadas (corre ANTES de curar párrafos)
+    text = fix_fragmented_units(text)
+    
+    # NUEVO: Sanación de la estructura del párrafo
+    text = heal_paragraphs(text)
+
     # Collapse 3+ consecutive blank lines (left behind by removed boilerplate)
     text = re.sub(r"\n{3,}", "\n\n", text)
 
+    # ¡El return siempre debe ir al final!
     return text.strip()
 
 
