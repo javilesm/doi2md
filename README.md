@@ -1,9 +1,34 @@
-# 📄 doi2md (DOI to Markdown)
+# 📄 doi2md (v6.1 — Deep Extraction & Post-Processing Edition)
 
-> **Convert scientific papers into enriched Markdown, ready for AI agents and RAG systems.**
-> **An advanced, multi-layered extraction pipeline converting scientific papers into structured Markdown bundles optimized for AI Agents, Vector DBs, and RAG architectures.**
+> **An advanced, multi-layered extraction pipeline converting scientific papers into clean, structured Markdown bundles optimized for AI Agents, Vector DBs, and RAG architectures.**
 
-`doi2md` is a powerful CLI tool that takes a DOI, a PDF URL, or a local PDF file and performs a deep extraction of its contents. Unlike standard converters that flatten documents into messy text, `doi2md` parses the document through 6 specialized layers—extracting metadata, tables, figures, references, and structural entities—and packages everything into a clean, portable `.zip` bundle.
+`doi2md` is a powerful CLI tool that takes a DOI, a PDF URL, or a local PDF file and performs a deep extraction of its contents. Unlike standard converters that flatten documents into messy text, `doi2md` parses the document through 6 specialized layers—extracting metadata, tables, figures, references, and structural entities. 
+
+**New in v6.1:** A dedicated Post-Processing engine purifies the text (removing publisher boilerplate, fixing encoding artifacts) and filters visual assets to ensure the highest quality embeddings for RAG systems.
+
+## 🌊 The Extraction Pipeline
+
+```text
+PDF (Local, URL, or GCS Bucket)
+   │
+   ├─ L1  CrossRef + Semantic Scholar  →  Metadata (dict)
+   │
+   ├─ L2  MarkItDown                   →  Full-text (raw extraction)
+   │         │
+   │         └──▶ clean_fulltext()     ──▶ Purified text (no boilerplate/artifacts)
+   │
+   ├─ L3  pdfplumber                   →  Tables (TSV)
+   ├─ L4  pypdf                        →  References (BibTeX)
+   │
+   ├─ L5  PyMuPDF                      →  Figures (raw images + captions)
+   │         │
+   │         └──▶ postprocess_figures()──▶ Filtered figures (no logos/tiny icons)
+   │
+   ├─ L6  Structural Parser            →  Section Map + Entities
+   │         (Runs safely on the purified text to avoid header/footer confusion)
+   │
+   └─ Markdown Assembler               →  <slug>.md & ZIP Bundle
+```
 
 ## ✨ The 6-Layer Architecture
 
@@ -37,10 +62,12 @@ The tool automatically compresses the extracted assets into a single `<slug>.zip
    cd doi2md
    ```
 
-2. Install the required dependencies (requests and markitdown):
+2. Install the required deep-extraction dependencies:
   ```bash
    pip install requests "markitdown[pdf]" pymupdf pdfplumber pypdf
   ```
+
+(Note: Ensure postprocess.py remains in the same directory as doi2md.py so the post-processor can be imported successfully).
    
 ## 🚀 Usage
 The CLI features Smart Input Detection. You can pass a DOI, a URL, or a local file directly.
@@ -61,12 +88,8 @@ python doi2md.py --pdf [https://storage.googleapis.com/bucket/paper.pdf](https:/
 python doi2md.py --pdf my_local_paper.pdf
 ```
 
-4. Extract Metadata OnlyIf you only want the abstract, citations, and Frontmatter (without downloading or converting the full PDF):
-```bash
-python doi_to_markdown.py 10.1016/j.oceram.2023.100348 --fast
-```
-
 ## ⚡ Customization Flags
+Disable specific extraction layers to speed up processing or reduce bundle size:
 
 | **Flag** | **Description** |
 | --- | --- |
