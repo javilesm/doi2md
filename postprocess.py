@@ -345,70 +345,79 @@ from pathlib import Path
 
 try:
     import pandas as pd
+    import numpy as np
 except ImportError:
     pd = None
+    np = None
 
 def optimize_table_for_rag(tsv_path: Path, table_id: int) -> str:
     """
-    Lee un TSV crudo, lo limpia de artefactos académicos, decide si debe 
-    reestructurarlo (transponer) y lo serializa en oraciones para el LLM.
+    Reads a raw TSV, cleans academic artifacts, intelligently transposes 
+    wide tables, and serializes the data into semantic sentences for LLMs.
     """
     if pd is None:
-        return "[Pandas no está instalado. Omitiendo optimización de tabla.]"
+        return "[Pandas is not installed. Skipping table optimization.]"
 
     try:
-        # Cargar el TSV
         df = pd.read_csv(tsv_path, sep='\t', dtype=str)
         
         # =========================================================
-        # 1. LIMPIEZA Y NORMALIZACIÓN (Data Cleansing)
+        # 1. CLEANING AND NORMALIZATION
         # =========================================================
-        # Elimina citas bibliográficas incrustadas ej: "310.2 [14]" -> "310.2"
-        # Elimina llamadas de nota al pie ej: "0.511a" o "0.511*" -> "0.511"
+        # Remove academic citation brackets (e.g., [12]), asterisks, etc.
         df = df.replace(to_replace=r'\s*\[\d+\]|\*|\^[a-zA-Z]', value='', regex=True)
         
-        # Limpia espacios extra en todas las celdas
-        df = df.apply(lambda col: col.str.strip())
+        # Clean headers: remove newlines and extra spaces
+        df.columns = [re.sub(r'\s+', ' ', str(col)).strip() for col in df.columns]
         
-        # Manejo de vacíos (Imputación)
-        df = df.fillna("N/A")
-        df = df.replace(["", "-", "–"], "N/A")
+        # Normalize nulls and artifacts
+        null_indicators = ['N/A', 'NA', '-', '—', '', 'nan', 'null', 'None']
+        df = df.replace(null_indicators, pd.NA)
 
-        # Guardamos la versión limpia sobre el TSV original
-        df.to_csv(tsv_path, sep='\t', index=False)
+        # Fix words broken by soft hyphens across lines
+        df = df.replace(to_replace=r'-\s+', value='', regex=True)
+
+        # Save the cleaned intermediate state back to TSV
+        df.to_csv(tsv_path, sep='\t', index=False, na_rep='N/A')
 
         # =========================================================
-        # 2. TRANSFORMACIÓN ESTRUCTURAL (Data Wrangling)
+        # 2. ADVANCED STRUCTURAL TRANSFORMATION
         # =========================================================
-        # Regla RAG: A los LLMs les cuesta leer tablas de más de 5-6 columnas.
-        # Si la tabla es muy ancha, la transponemos (giramos 90 grados).
+        # If the table has 6 or more columns, transpose it intelligently
         if len(df.columns) >= 6:
-            # Transponer y usar la primera columna como nuevos encabezados
-            df_t = df.T
-            df_t.columns = [f"Item_{i}" for i in range(len(df_t.columns))]
-            df_t.reset_index(inplace=True)
-            df_t = df_t.rename(columns={"index": "Atributo"})
-            df = df_t
+            first_col_name = df.columns[0]
+            df = df.set_index(first_col_name).T
+            df.reset_index(inplace=True)
+            df.rename(columns={"index": "Attribute_or_Reference"}, inplace=True)
+            
+            # Clean resulting columns after transposition
+            df.columns = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df.columns)]
 
         # =========================================================
-        # 3. SERIALIZACIÓN SEMÁNTICA (Optimización para RAG)
+        # 3. SEMANTIC SERIALIZATION
         # =========================================================
-        # En lugar de devolver Markdown `| X | Y |`, creamos viñetas lógicas
-        # que inyectan el contexto de la tabla en cada fragmento de texto.
-        
-        sentences = [f"### Datos Extraídos de la Tabla {table_id}:\n"]
+        sentences = [f"### Extracted Data from Table {table_id}:\n"]
         columns = df.columns.tolist()
+        data_row_counter = 1
         
         for index, row in df.iterrows():
-            # Filtramos las celdas que dicen N/A para no meter ruido al LLM
-            row_data = [f"{col}: {row[col]}" for col in columns if str(row[col]) != "N/A"]
+            row_data = []
+            for col in columns:
+                val = row[col]
+                
+                # Filter out nulls natively using pandas
+                if pd.notna(val) and str(val).strip().lower() not in ['nan', 'none', '']:
+                    clean_val = re.sub(r'\s+', ' ', str(val)).strip()
+                    row_data.append(f"**{col}**: {clean_val}")
             
-            # Construimos una oración por fila
+            # Omit rows that became empty after filtering
             if row_data:
-                sentence = f"- Fila {index + 1}: " + ", ".join(row_data) + "."
+                # Using ' | ' to prevent confusion with internal commas
+                sentence = f"- **Row {data_row_counter}**: " + " | ".join(row_data) + "."
                 sentences.append(sentence)
+                data_row_counter += 1
 
         return "\n".join(sentences)
 
     except Exception as e:
-        return f"[Error procesando TSV para RAG: {e}]"
+        return f"[Error processing TSV for RAG: {e}]"

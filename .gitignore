@@ -4,3 +4,4 @@
 *.zip
 *_bundle/
 .venv/
+__pycache__/
