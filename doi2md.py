@@ -391,6 +391,55 @@ def extract_references(pdf_path: Path, refs_path: Path) -> list[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 # L5 — FIGURES  (PyMuPDF — extract bytes + caption linking)
 # ══════════════════════════════════════════════════════════════════════════════
+import os
+from pathlib import Path
+
+# Intentar importar el SDK moderno de Google GenAI
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+
+def analyze_figure_with_vision(image_path: Path) -> str:
+    """
+    Capa L5b: Analiza una imagen científica utilizando un LLM multimodal
+    para generar una descripción semántica optimizada para RAG.
+    """
+    if not genai or "GEMINI_API_KEY" not in os.environ:
+        return "> *[Aviso: API de Visión no configurada o librería faltante. Solo se conservará la imagen]*"
+
+    try:
+        # Inicializa el cliente (tomará GEMINI_API_KEY de las variables de entorno)
+        client = genai.Client()
+        
+        # Prompt de Ingeniería: Forzamos al modelo a extraer datos útiles para la IA
+        prompt = (
+            "Actúa como un experto en extracción de datos científicos para bases de datos vectoriales. "
+            "Analiza esta figura académica y redacta un resumen conciso en un solo párrafo. "
+            "Debes incluir: "
+            "1. El tipo de gráfico o imagen. "
+            "2. Las variables representadas (ejes X e Y) y sus unidades. "
+            "3. La tendencia principal, anomalía o conclusión evidente en los datos. "
+            "No incluyas saludos, ve directo al análisis científico."
+        )
+
+        image_bytes = image_path.read_bytes()
+        mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+        
+        # Usamos flash por su velocidad de inferencia en procesamiento batch
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                prompt
+            ]
+        )
+        
+        return f"> **Análisis Visual (RAG):** {response.text.strip()}"
+        
+    except Exception as e:
+        return f"> *[Error en el procesamiento de visión: {str(e)}]*"
 
 def extract_figures(pdf_path: Path, figures_dir: Path) -> list[dict]:
     """
@@ -580,6 +629,7 @@ def build_markdown(
     tables: list[dict],
     figures: list[dict],
     references: list[str],
+    figures_to_process: list = None # <-- Nuevo parámetro
 ) -> str:
     parts = [build_frontmatter(meta)]
 
@@ -630,18 +680,53 @@ def build_markdown(
         if meas:
             parts.append(f"\n**Measurements ({len(meas)}):** \n"
                          f"`{'` · `'.join(meas)}`\n")
-
-    # ── Figures gallery ───────────────────────────────────────────────────────
+    # ── Figures gallery (L5b Vision Integration) ──────────────────────────────
+    if figures_to_process is None:
+        figures_to_process = []
+        
     if figures:
-        parts.append("\n## Figures\n")
+        parts.append("\n## Figures Gallery\n\n"
+                     "> AI-generated semantic analysis for vectorization.\n")
+        
+        from pathlib import Path
+        
+        # Crear un Set seguro con los nombres exactos de los archivos aprobados
+        approved_filenames = set()
+        for f in figures_to_process:
+            if isinstance(f, dict):
+                # BÚSQUEDA ROBUSTA APLICADA AQUÍ
+                raw_p = f.get("filename") or f.get("path") or f.get("filepath") or f.get("file")
+            else:
+                raw_p = f
+            
+            if raw_p: 
+                approved_filenames.add(Path(raw_p).name)
+        
         for fig in figures:
-            cap = fig["caption"] or f"Figure {fig['id']} — page {fig['page']}"
-            parts.append(
-                f"\n### Figure {fig['id']} (page {fig['page']})\n\n"
-                f"![{cap}](figures/{fig['filename']})\n\n"
-                f"*{cap}* \n"
-                f"Resolution: {fig['width_px']} × {fig['height_px']} px\n"
-            )
+            # 1. Resolve path (BÚSQUEDA ROBUSTA APLICADA AQUÍ TAMBIÉN)
+            if isinstance(fig, dict):
+                raw_path = fig.get("filename") or fig.get("path") or fig.get("filepath") or fig.get("file")
+            else:
+                raw_path = fig
+                
+            if not raw_path: 
+                continue
+                
+            fig_name = Path(raw_path).name
+            
+            # 2. Insert image link in standard Markdown
+            parts.append(f"\n![Figure](figures/{fig_name})\n\n")
+            
+            # 3. VERIFICACIÓN DE COSTOS
+            if fig_name in approved_filenames:
+                physical_path = next(Path.cwd().rglob(fig_name), None)
+                
+                if physical_path:
+                    print(f"  [L5b] Analyzing {fig_name} with Vision AI...")
+                    vision_analysis = analyze_figure_with_vision(physical_path)
+                    parts.append(f"{vision_analysis}\n")
+            else:
+                parts.append("> *[Vision analysis skipped by user to save API costs]*\n")
 
     # ── Tables ────────────────────────────────────────────────────────────────
     if tables:
@@ -667,7 +752,105 @@ def build_markdown(
 
     return "\n".join(parts)
 
+def triage_figures_interactively(figures: list) -> list:
+    """
+    Creates a temporary HTML gallery of extracted figures and asks the user
+    which ones should be processed by the Vision AI to optimize API costs.
+    """
+    if not figures:
+        return []
 
+    from pathlib import Path
+    import time
+    import base64 # <-- Importante para el Codespace
+
+    # 1. Crear una galería HTML temporal
+    html_content = "<html><body style='background:#1e1e1e; color:#ccc; font-family:sans-serif; padding:20px;'>"
+    html_content += "<h2>🔍 Preview de Imágenes Extraídas</h2>"
+    html_content += "<p>Revisa las imágenes antes de autorizar el gasto de tokens API.</p><hr>"
+    
+    for fig in figures:
+        if isinstance(fig, dict):
+            raw_path = fig.get("filename") or fig.get("path") or fig.get("filepath") or fig.get("file")
+        else:
+            raw_path = fig
+            
+        if not raw_path: continue
+            
+        fig_path = Path(raw_path)
+        
+        physical_path = None
+        if fig_path.exists():
+            physical_path = fig_path
+        else:
+            found_files = list(Path.cwd().rglob(fig_path.name))
+            if found_files:
+                physical_path = found_files[0]
+        
+        if physical_path and physical_path.exists():
+            # INCRUSTACIÓN BASE64 PARA SALTAR LA SEGURIDAD DEL CODESPACE
+            with open(physical_path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            mime_type = "image/png" if physical_path.suffix.lower() == ".png" else "image/jpeg"
+            img_src = f"data:{mime_type};base64,{encoded_string}"
+
+            html_content += f"<div style='margin-bottom:30px; border:1px solid #444; padding:10px;'>"
+            html_content += f"<h3 style='color:#4DAAFB;'>{physical_path.name}</h3>"
+            html_content += f"<img src='{img_src}' style='max-width: 800px; max-height: 600px; background:white;'/>"
+            html_content += f"</div>"
+
+    html_content += "</body></html>"
+    
+    # Guardar el HTML en el directorio actual
+    preview_file = Path.cwd() / "vision_preview.html"
+    preview_file.write_text(html_content, encoding="utf-8")
+
+    # 2. Interfaz de Terminal
+    print(f"\n{'-'*60}")
+    print(f"🧠 INTERVENCIÓN REQUERIDA: Optimización de Costos de IA")
+    print(f"Se detectaron {len(figures)} imágenes útiles. Haz Ctrl+Click en el siguiente enlace:")
+    print(f"👉 file://{preview_file.absolute()}\n")
+    
+    approved_figures = []
+    
+    while True:
+        choice = input("¿Deseas procesar con IA? [T]odas / [N]inguna / [I]nteractivo: ").strip().lower()
+        
+        if choice in ['t', 'todas', 'all']:
+            approved_figures = figures
+            print("  ✓ Procesando todas las imágenes.")
+            break
+        elif choice in ['n', 'ninguna', 'none']:
+            approved_figures = []
+            print("  ⏭ Omitiendo análisis de visión (Ahorro de tokens).")
+            break
+        elif choice in ['i', 'interactivo']:
+            print("\nSelecciona (Y/n) para cada imagen:")
+            for fig in figures:
+                # Misma extracción robusta para las preguntas en terminal
+                if isinstance(fig, dict):
+                    raw_path = fig.get("path") or fig.get("filepath") or fig.get("filename") or fig.get("file")
+                else:
+                    raw_path = fig
+                
+                if not raw_path: 
+                    continue
+                    
+                fig_name = Path(raw_path).name
+                
+                resp = input(f"  ¿Procesar {fig_name}? [Y/n]: ").strip().lower()
+                if resp != 'n':
+                    approved_figures.append(fig)
+            break
+        else:
+            print("  Opción no válida. Escribe T, N o I.")
+
+    # 3. Limpieza
+    time.sleep(1) 
+    preview_file.unlink(missing_ok=True)
+    
+    return approved_figures
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -804,7 +987,7 @@ def main():
             print(f"  Entities: {len(entities.get('chemicals', []))} compounds  "
                   f"{len(entities.get('measurements', []))} measurements")
 
-        # L3
+        # L3 TABLE EXTRACION
         if not args.no_tables:
             print("\n[L3] pdfplumber table extraction...")
             tables = extract_tables(pdf_path, tables_dir)
@@ -812,23 +995,34 @@ def main():
             if not tables and tables_dir.exists():
                 shutil.rmtree(tables_dir, ignore_errors=True)
 
-        # L5
+        # Inicializar variables por defecto para evitar NameError
+        figures = []
+        figures_to_process = []
+
+        # L5 FIGURE EXTRACTION
         if not args.no_figures:
             print("\n[L5] PyMuPDF figure extraction...")
             figures = extract_figures(pdf_path, figures_dir)
             
-            # L5b: Post-processing / Filtering
-            figures_before = {f["filename"] for f in figures}
-            figures = postprocess_figures(figures)
-            figures_after = {f["filename"] for f in figures}
-            
-            # Limpiar archivos de imágenes descartadas del disco
-            for dropped in figures_before - figures_after:
-                (figures_dir / dropped).unlink(missing_ok=True)
+            # 1. L5b: Post-processing / Filtering (El código limpia la basura primero)
+            if figures:
+                figures_before = {f["filename"] for f in figures}
+                figures = postprocess_figures(figures)
+                figures_after = {f["filename"] for f in figures}
                 
-            print(f"  {len(figures)} figures (after filtering logos/duplicates)")
+                # Limpiar archivos de imágenes descartadas del disco
+                for dropped in figures_before - figures_after:
+                    (figures_dir / dropped).unlink(missing_ok=True)
+                    
+                print(f"  {len(figures)} figures (after filtering logos/duplicates)")
+            
+            # 2. Eliminar directorio si no sobrevivió ninguna figura
             if not figures and figures_dir.exists():
                 shutil.rmtree(figures_dir, ignore_errors=True)
+
+            # 3. 🔥 INYECCIÓN: Triaje de Costos (El usuario solo revisa las que sobrevivieron)
+            if figures:
+                figures_to_process = triage_figures_interactively(figures)
 
         # L4
         if not args.no_refs:
@@ -848,7 +1042,8 @@ def main():
 
     # ── Assemble & write Markdown ─────────────────────────────────────────────
     print("\nAssembling Markdown...")
-    md_content = build_markdown(meta, fulltext, sections, entities, tables, figures, references)
+    # Ahora figures_to_process siempre existirá (sea una lista llena o vacía)
+    md_content = build_markdown(meta, fulltext, sections, entities, tables, figures, references, figures_to_process)
     (staging / f"{base_name}.md").write_text(md_content, encoding="utf-8")
 
     # ── ZIP ───────────────────────────────────────────────────────────────────
