@@ -56,7 +56,7 @@ except ImportError:
     sys.exit("❌  pip install pymupdf")
 
 try:
-    from postprocess import clean_fulltext, postprocess_figures
+    from postprocess import clean_fulltext, postprocess_figures, optimize_table_for_rag
 except ImportError:
     sys.exit("❌  Missing postprocess.py in the same directory.")
 
@@ -239,7 +239,7 @@ def extract_fulltext(pdf_path: Path) -> str:
 def extract_tables(pdf_path: Path, tables_dir: Path) -> list[dict]:
     """
     Returns list of table dicts with md_table and tsv_path.
-    Writes individual .tsv files to tables_dir.
+    Writes individual .tsv files to tables_dir, optimized for RAG.
     """
     try:
         import pdfplumber
@@ -254,43 +254,74 @@ def extract_tables(pdf_path: Path, tables_dir: Path) -> list[dict]:
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
-                for raw in page.extract_tables():
+                
+                # PLAN A: Intenta extraer como una tabla normal con bordes cerrados
+                raw_tables = page.extract_tables()
+                
+                # PLAN B: Estrategia de "Recorte y Escaneo" para tablas académicas
+                if not raw_tables:
+                    finder_settings = {
+                        "vertical_strategy": "text",
+                        "horizontal_strategy": "lines",
+                    }
+                    found_tables = page.find_tables(table_settings=finder_settings)
+                    
+                    raw_tables = []
+                    for t in found_tables:
+                        cropped_page = page.within_bbox(t.bbox)
+                        extract_settings = {
+                            "vertical_strategy": "text",
+                            "horizontal_strategy": "text",
+                            "intersection_y_tolerance": 15
+                        }
+                        t_data = cropped_page.extract_table(table_settings=extract_settings)
+                        if t_data:
+                            raw_tables.append(t_data)
+
+                for raw in raw_tables:
                     if not raw or len(raw) < 2:
                         continue
+                    
+                    # --- FILTRO ANTI-CLONACIÓN ---
+                    total_words = sum(len(str(c).split()) for row in raw for c in row if c)
+                    total_cells = sum(1 for row in raw for c in row if c)
+                    
+                    if total_cells > 0 and (total_words / total_cells) > 10:
+                        continue  # Es texto narrativo aplanado, lo ignoramos
+
                     table_id += 1
 
+                    # Limpiamos saltos de línea internos de las celdas
                     cleaned = [
                         [str(c).replace("\n", " ").strip() if c else "" for c in row]
                         for row in raw
                     ]
 
-                    # Write TSV
+                    # Igualamos el ancho de todas las filas para que Pandas no tire error al leer el TSV
+                    col_count = max(len(r) for r in cleaned)
+                    cleaned = [r + [""] * (col_count - len(r)) for r in cleaned]
+
+                    # 1. Escribimos el TSV crudo al disco
                     tsv_name = f"table_{table_id:02d}_page{page_num}.tsv"
                     tsv_path = tables_dir / tsv_name
                     tsv_path.write_text(
                         "\n".join("\t".join(row) for row in cleaned), encoding="utf-8"
                     )
 
-                    # Build Markdown table
-                    col_count = max(len(r) for r in cleaned)
-                    cleaned = [r + [""] * (col_count - len(r)) for r in cleaned]
-                    header = cleaned[0]
-                    md_rows = [
-                        "| " + " | ".join(header) + " |",
-                        "| " + " | ".join(["---"] * len(header)) + " |",
-                    ] + ["| " + " | ".join(row) + " |" for row in cleaned[1:]]
+                    # 2. CAPA 3b: Limpieza de Pandas, Transposición y Serialización Semántica
+                    semantic_table = optimize_table_for_rag(tsv_path, table_id)
 
+                    # 3. Guardamos el resultado en la lista para armar el Markdown
                     results.append({
                         "id": table_id, "page": page_num,
                         "rows": len(cleaned), "cols": col_count,
-                        "md_table": "\n".join(md_rows),
+                        "md_table": semantic_table,  # <-- Inyectamos las oraciones aquí
                         "tsv_name": tsv_name,
                     })
     except Exception as e:
         print(f"   WARN  Table extraction: {e}")
 
     return results
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L4 — REFERENCES  (pypdf + heuristic parser → BibTeX stubs)
