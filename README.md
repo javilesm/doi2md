@@ -4,7 +4,9 @@
 
 `doi2md` is a powerful CLI tool that takes a DOI, a PDF URL, or a local PDF file and performs a deep extraction of its contents. Unlike standard converters that flatten documents into messy text, `doi2md` parses the document through 6 specialized layers—extracting metadata, tables, figures, references, and structural entities. 
 
-**New in v6.1:** A dedicated Post-Processing engine purifies the text (removing publisher boilerplate, fixing encoding artifacts) and filters visual assets to ensure the highest quality embeddings for RAG systems.
+**New in v6.2:** * **L5b Vision AI Integration:** Uses multimodal LLMs (Google Gemini) to automatically analyze extracted figures and inject semantic descriptions directly into the Markdown, making visual data searchable for RAG systems.
+* **Interactive Cost Triage:** A Human-in-the-Loop HTML preview system that allows you to select which images to process with AI, drastically reducing API costs by skipping publisher logos and irrelevant graphics.
+* **Semantic Table Serialization:** Tables are no longer just raw TSVs; they are now intelligently normalized, transposed, and serialized into highly readable semantic sentences optimized for LLM attention mechanisms.
 
 ## 🌊 The Extraction Pipeline
 
@@ -17,12 +19,15 @@ PDF (Local, URL, or GCS Bucket)
    │         │
    │         └──▶ clean_fulltext()     ──▶ Purified text (no boilerplate/artifacts)
    │
-   ├─ L3  pdfplumber                   →  Tables (TSV)
+   ├─ L3  pdfplumber + pandas          →  Tables (TSV) + Semantic Serialization
    ├─ L4  pypdf                        →  References (BibTeX)
    │
    ├─ L5  PyMuPDF                      →  Figures (raw images + captions)
    │         │
-   │         └──▶ postprocess_figures()──▶ Filtered figures (no logos/tiny icons)
+   │         ├──▶ postprocess_figures()──▶ Filtered figures (no logos/tiny icons)
+   │         └──▶ Interactive Triage   ──▶ Local HTML preview for API cost control
+   │
+   ├─ L5b Vision AI (Gemini)           →  Semantic Graph Descriptions injected
    │
    ├─ L6  Structural Parser            →  Section Map + Entities
    │         (Runs safely on the purified text to avoid header/footer confusion)
@@ -36,9 +41,10 @@ PDF (Local, URL, or GCS Bucket)
 | :--- | :--- | :--- |
 | **L1** | CrossRef + Semantic Scholar | Merged bibliographic metadata, TL;DR, and exact publication data. |
 | **L2** | MarkItDown | Robust full-text extraction mapped to structured Markdown. |
-| **L3** | pdfplumber | Parses complex tables and outputs programmatic `.tsv` files. |
+| **L3** | pdfplumber + pandas | Parses complex tables, normalizes nulls, and outputs semantic RAG sentences & .tsv files. |
 | **L4** | pypdf + Heuristics | Parses the reference list and generates BibTeX-style stubs. |
 | **L5** | PyMuPDF | Extracts raster figures (≥150x150 px) and attempts caption linking. |
+| **L5b** | Google GenAI (Gemini) | Multimodal analysis of charts and graphs for deep context vectorization. |
 | **L6** | Structural Parser | Generates a section map and auto-extracts chemical/measurement entities. |
 
 ## 📦 Output Bundle Structure
@@ -64,7 +70,13 @@ The tool automatically compresses the extracted assets into a single `<slug>.zip
 
 2. Install the required deep-extraction dependencies:
   ```bash
-   pip install requests "markitdown[pdf]" pymupdf pdfplumber pypdf
+   pip install requests "markitdown[pdf]" pymupdf pdfplumber pypdf google-genai pandas numpy
+  ```
+
+3. Configure your Vision API Key (Required for L5b):
+Set your Google Gemini API key as an environment variable. If using GitHub Codespaces, it is highly recommended to add this as a Repository Secret for secure, automatic injection.
+  ```bash
+   export GEMINI_API_KEY="your_api_key_here"
   ```
 
 (Note: Ensure postprocess.py remains in the same directory as doi2md.py so the post-processor can be imported successfully).
@@ -87,6 +99,8 @@ python doi2md.py --pdf [https://storage.googleapis.com/bucket/paper.pdf](https:/
 ```bash
 python doi2md.py --pdf my_local_paper.pdf
 ```
+## 🧠 Interactive Cost Optimization
+When processing documents with figures, doi2md will automatically generate a local vision_preview.html file containing base64-encoded thumbnails of the extracted assets. The CLI will pause and prompt you to select which images are worth processing with the Gemini Vision API (saving tokens by skipping publisher logos or irrelevant diagrams).
 
 ## ⚡ Customization Flags
 Disable specific extraction layers to speed up processing or reduce bundle size:
@@ -112,7 +126,9 @@ The generated `<slug>.md` file is tailored for Large Language Models. It include
 
 -   **Entity Lists** (Auto-extracted chemicals and units).
 
--   **Figure Gallery** (Embedded `![alt](figures/...)` syntax linked to the extracted images).
+-   **Figures Gallery** (Embedded syntax linked to images, enriched with Gemini Vision AI semantic descriptions).
+  
+-   **Semantic Tables** (Structured sentence arrays optimized for vector search).
 
 -   **Full Text & References**.
 
