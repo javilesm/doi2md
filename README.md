@@ -70,7 +70,7 @@ The tool automatically compresses the extracted assets into a single `<slug>.zip
 
 2. Install the required deep-extraction dependencies:
   ```bash
-   pip install requests "markitdown[pdf]" pymupdf pdfplumber pypdf google-genai pandas numpy
+   pip install -r requirements.txt
   ```
 
 3. Configure your Vision API Key (Required for L5b):
