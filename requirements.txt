@@ -1,0 +1,9 @@
+requests
+markitdown[pdf]
+pymupdf
+pdfplumber
+pypdf
+google-genai
+pandas
+numpy
+google-cloud-storage
